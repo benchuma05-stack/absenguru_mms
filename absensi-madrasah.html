@@ -677,7 +677,7 @@ function App() {
           <Field label="Nama Kelas *"><input className={inp} value={kelasF.nama} placeholder="cth: VII A" onChange={e=>setKelasF(p=>({...p,nama:e.target.value}))} /></Field>
           <Field label="Tingkat">
             <select className={sel} value={kelasF.tingkat} onChange={e=>setKelasF(p=>({...p,tingkat:e.target.value}))}>
-              {["VII","VIII","IX","X","XI","XII"].map(t=><option key={t} value={t}>{t}</option>)}
+              {["IDD","MTS","ALY"].map(t=><option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
           <div className="flex gap-3 justify-end mt-5">
