@@ -1,0 +1,783 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Absensi Guru — Madrasah Digital</title>
+
+<!-- Tailwind CSS -->
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- React -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<!-- Babel (JSX transform) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<!-- SheetJS (Excel export) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Georgia, 'Times New Roman', serif; background: #f3f4f6; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: #f1f1f1; }
+  ::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 3px; }
+  select, input, button { font-family: system-ui, sans-serif; }
+  .spin { animation: spin 1s linear infinite; display: inline-block; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  .fade-in { animation: fadeIn 0.2s ease; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useCallback, useMemo } = React;
+
+// ─── KONFIGURASI SUPABASE ─────────────────────────────────────────────────────
+// Ganti dengan URL dan Key Supabase Anda jika berbeda
+const SUPABASE_URL = "https://pxotgcuhzathfgmfrweb.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB4b3RnY3VoemF0aGZnbWZyd2ViIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU3NDc2MzUsImV4cCI6MjA5MTMyMzYzNX0.CCCveSvHg1TXFB8dYrFqug9n-kDhM8SywL1m4Qv5XMo";
+
+const hdrs = {
+  "Content-Type": "application/json",
+  "apikey": SUPABASE_KEY,
+  "Authorization": `Bearer ${SUPABASE_KEY}`,
+  "Prefer": "return=representation",
+};
+const sbGet = async (table, params="") => {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${params}&order=created_at.asc`, { headers: hdrs });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+};
+const sbInsert = async (table, body) => {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, { method:"POST", headers:hdrs, body:JSON.stringify(body) });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+};
+const sbUpdate = async (table, id, body) => {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`, { method:"PATCH", headers:hdrs, body:JSON.stringify(body) });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+};
+const sbDelete = async (table, id) => {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?id=eq.${id}`, { method:"DELETE", headers:hdrs });
+  if (!r.ok) throw new Error(await r.text());
+};
+const sbUpsert = async (table, body) => {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method:"POST",
+    headers: { ...hdrs, "Prefer":"resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+};
+
+// ─── KONSTANTA ────────────────────────────────────────────────────────────────
+const HARI_LIST = ["Sabtu","Ahad","Senin","Selasa","Rabu","Kamis"];
+const STATUS_OPT = [
+  { value:"hadir", label:"Hadir", color:"#10b981", bg:"#d1fae5" },
+  { value:"izin",  label:"Izin",  color:"#f59e0b", bg:"#fef3c7" },
+  { value:"sakit", label:"Sakit", color:"#3b82f6", bg:"#dbeafe" },
+  { value:"alpha", label:"Alpha", color:"#ef4444", bg:"#fee2e2" },
+];
+const BULAN = ["Januari","Februari","Maret","April","Mei","Juni","Juli","Agustus","September","Oktober","November","Desember"];
+
+const uid = () => Math.random().toString(36).slice(2,9);
+const todayStr = () => new Date().toISOString().slice(0,10);
+const getHari = (d) => ["Ahad","Senin","Selasa","Rabu","Kamis","Jumat","Sabtu"][new Date(d).getDay()];
+const getDays = (y,m) => new Date(y,m+1,0).getDate();
+const fmtTgl = (s) => s ? new Date(s).toLocaleDateString("id-ID",{weekday:"long",day:"numeric",month:"long",year:"numeric"}) : "";
+
+// ─── EXPORT EXCEL ─────────────────────────────────────────────────────────────
+function exportRekap({ guru, absensi, bulan, tahun }) {
+  const X = window.XLSX;
+  const wb = X.utils.book_new();
+  const prefix = `${tahun}-${String(bulan+1).padStart(2,"0")}`;
+  const days = getDays(tahun, bulan);
+  const nm = BULAN[bulan];
+
+  // Sheet 1 — Rekap Ringkas
+  const s1 = [
+    [`REKAP ABSENSI GURU — ${nm.toUpperCase()} ${tahun}`],
+    [`Dicetak: ${fmtTgl(todayStr())}`], [],
+    ["No","Nama Guru","NIP","Jabatan","Hadir","Izin","Sakit","Alpha","Total","% Hadir"],
+  ];
+  guru.forEach((g,i) => {
+    const rows = absensi.filter(a=>a.guru_id===g.id && a.tanggal.startsWith(prefix));
+    const h=rows.filter(a=>a.status==="hadir").length, iz=rows.filter(a=>a.status==="izin").length,
+          s=rows.filter(a=>a.status==="sakit").length, al=rows.filter(a=>a.status==="alpha").length;
+    const tot=h+iz+s+al;
+    s1.push([i+1,g.nama,g.nip||"-",g.jabatan||"-",h,iz,s,al,tot,tot>0?`${Math.round(h/tot*100)}%`:"0%"]);
+  });
+  s1.push(["","TOTAL","","",
+    `=SUM(E5:E${4+guru.length})`,`=SUM(F5:F${4+guru.length})`,
+    `=SUM(G5:G${4+guru.length})`,`=SUM(H5:H${4+guru.length})`,
+    `=SUM(I5:I${4+guru.length})`,"",
+  ]);
+  const ws1 = X.utils.aoa_to_sheet(s1);
+  ws1["!cols"]=[{wch:4},{wch:35},{wch:20},{wch:25},{wch:7},{wch:7},{wch:7},{wch:7},{wch:7},{wch:12}];
+  ws1["!merges"]=[{s:{r:0,c:0},e:{r:0,c:9}}];
+  X.utils.book_append_sheet(wb, ws1, "Rekap Ringkas");
+
+  // Sheet 2 — Detail Harian
+  const s2 = [
+    [`DETAIL ABSENSI HARIAN — ${nm.toUpperCase()} ${tahun}`],
+    ["Keterangan: H=Hadir, I=Izin, S=Sakit, A=Alpha"], [],
+    ["No","Nama Guru","Jabatan",...Array.from({length:days},(_,i)=>`${i+1}`)],
+  ];
+  guru.forEach((g,i) => {
+    const row=[i+1,g.nama,g.jabatan||"-"];
+    for(let d=1;d<=days;d++){
+      const tgl=`${prefix}-${String(d).padStart(2,"0")}`;
+      const rec=absensi.find(a=>a.guru_id===g.id&&a.tanggal===tgl);
+      row.push(rec?{hadir:"H",izin:"I",sakit:"S",alpha:"A"}[rec.status]||"-":"-");
+    }
+    s2.push(row);
+  });
+  const ws2=X.utils.aoa_to_sheet(s2);
+  ws2["!cols"]=[{wch:4},{wch:32},{wch:22},...Array(days).fill({wch:4})];
+  ws2["!merges"]=[{s:{r:0,c:0},e:{r:0,c:days+2}}];
+  X.utils.book_append_sheet(wb, ws2, "Detail Harian");
+
+  // Sheet 3 — Jam Masuk & Pulang
+  const s3=[
+    [`REKAP JAM MASUK & PULANG — ${nm.toUpperCase()} ${tahun}`],[],
+    ["No","Nama Guru","Tanggal","Hari","Status","Jam Masuk","Jam Pulang","Durasi (jam)"],
+  ];
+  let rn=1;
+  guru.forEach(g=>{
+    absensi.filter(a=>a.guru_id===g.id&&a.tanggal.startsWith(prefix)&&a.status==="hadir")
+      .sort((a,b)=>a.tanggal.localeCompare(b.tanggal))
+      .forEach(rec=>{
+        let dur="-";
+        if(rec.jam_masuk&&rec.jam_pulang){
+          const [mh,mm]=rec.jam_masuk.split(":").map(Number);
+          const [ph,pm]=rec.jam_pulang.split(":").map(Number);
+          dur=((ph*60+pm)-(mh*60+mm)/60).toFixed(1);
+        }
+        s3.push([rn++,g.nama,rec.tanggal,getHari(rec.tanggal),"Hadir",rec.jam_masuk||"-",rec.jam_pulang||"-",dur]);
+      });
+  });
+  const ws3=X.utils.aoa_to_sheet(s3);
+  ws3["!cols"]=[{wch:4},{wch:32},{wch:13},{wch:10},{wch:8},{wch:12},{wch:12},{wch:12}];
+  ws3["!merges"]=[{s:{r:0,c:0},e:{r:0,c:7}}];
+  X.utils.book_append_sheet(wb, ws3, "Jam Masuk & Pulang");
+
+  X.writeFile(wb, `Absensi_${nm}_${tahun}.xlsx`);
+}
+
+function exportHarian({ guru, jadwal, absensi, kelas, tanggal }) {
+  const X = window.XLSX;
+  const wb = X.utils.book_new();
+  const hari = getHari(tanggal);
+  const jh = jadwal.filter(j=>j.hari===hari);
+  const gids = [...new Set(jh.map(j=>j.guru_id))];
+  const data = [
+    [`ABSENSI HARIAN — ${hari.toUpperCase()}, ${fmtTgl(tanggal).toUpperCase()}`],[],
+    ["No","Nama Guru","NIP","Jabatan","Kelas","Mata Pelajaran","Jam","Status","Jam Masuk","Jam Pulang","Tanda Tangan"],
+  ];
+  gids.forEach((gid,i)=>{
+    const g=guru.find(x=>x.id===gid);
+    const gjj=jh.filter(j=>j.guru_id===gid);
+    const rec=absensi.find(a=>a.guru_id===gid&&a.tanggal===tanggal);
+    const st=rec?rec.status.charAt(0).toUpperCase()+rec.status.slice(1):"Belum";
+    gjj.forEach((jj,ji)=>{
+      const k=kelas.find(x=>x.id===jj.kelas_id);
+      data.push([ji===0?i+1:"",ji===0?g?.nama||"-":"",ji===0?g?.nip||"-":"",ji===0?g?.jabatan||"-":"",
+        k?.nama||"-",jj.mapel,`${jj.jam_mulai}–${jj.jam_selesai}`,
+        ji===0?st:"",ji===0?rec?.jam_masuk||"-":"",ji===0?rec?.jam_pulang||"-":"",""]);
+    });
+    if(!gjj.length) data.push([i+1,g?.nama||"-",g?.nip||"-",g?.jabatan||"-","-","-","-",st,rec?.jam_masuk||"-",rec?.jam_pulang||"-",""]);
+  });
+  data.push([],[`Total hadir: ${absensi.filter(a=>a.tanggal===tanggal&&a.status==="hadir").length}`]);
+  const ws=X.utils.aoa_to_sheet(data);
+  ws["!cols"]=[{wch:4},{wch:32},{wch:20},{wch:24},{wch:8},{wch:22},{wch:16},{wch:10},{wch:11},{wch:11},{wch:16}];
+  ws["!merges"]=[{s:{r:0,c:0},e:{r:0,c:10}}];
+  X.utils.book_append_sheet(wb, ws, "Absensi Harian");
+  X.writeFile(wb, `Absensi_${hari}_${tanggal}.xlsx`);
+}
+
+// ─── SUB KOMPONEN ─────────────────────────────────────────────────────────────
+function Modal({ title, onClose, children }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{background:"rgba(0,0,0,0.45)"}} onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full fade-in" style={{maxWidth:480}} onClick={e=>e.stopPropagation()}>
+        <div className="flex justify-between items-center px-6 py-4 rounded-t-2xl" style={{background:"#1e3a5f"}}>
+          <span className="font-bold text-sm" style={{color:"#e2c27d",fontFamily:"system-ui"}}>{title}</span>
+          <button onClick={onClose} className="text-lg" style={{background:"none",border:"none",color:"#e2c27d",cursor:"pointer"}}>✕</button>
+        </div>
+        <div className="p-6">{children}</div>
+      </div>
+    </div>
+  );
+}
+function Field({ label, children }) {
+  return (
+    <div className="mb-4">
+      <label className="block text-xs font-semibold mb-1" style={{color:"#374151",fontFamily:"system-ui"}}>{label}</label>
+      {children}
+    </div>
+  );
+}
+function Toast({ msg, type }) {
+  if (!msg) return null;
+  return (
+    <div className="fixed top-5 right-5 z-50 px-5 py-3 rounded-xl text-sm font-semibold shadow-xl fade-in"
+      style={{background:type==="err"?"#7f1d1d":"#1e3a5f",color:"#e2c27d",fontFamily:"system-ui"}}>
+      {msg}
+    </div>
+  );
+}
+function Badge({ status }) {
+  const s = STATUS_OPT.find(x=>x.value===status)||STATUS_OPT[0];
+  return <span className="px-3 py-0.5 rounded-full text-xs font-bold" style={{background:s.bg,color:s.color,fontFamily:"system-ui"}}>{s.label}</span>;
+}
+function Chip({ children }) {
+  return <span className="px-2 py-0.5 rounded text-xs font-semibold" style={{background:"#ede9fe",color:"#7c3aed",fontFamily:"system-ui"}}>{children}</span>;
+}
+
+// ─── INPUT STYLES ─────────────────────────────────────────────────────────────
+const inp = "w-full px-3 py-2 border border-gray-300 rounded-lg text-sm outline-none focus:border-blue-400";
+const sel = "w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white outline-none";
+const selSm = "px-2 py-1.5 border border-gray-300 rounded-lg text-sm bg-white outline-none";
+const timInp = "px-2 py-1.5 border border-gray-300 rounded-lg text-sm outline-none";
+const btnPrimary = "px-5 py-2 rounded-lg text-sm font-semibold cursor-pointer border-none shadow";
+const btnGreen = "px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-none shadow";
+const btnSmBlue = "px-3 py-1 rounded text-xs cursor-pointer";
+const btnSmRed = "px-2 py-1 rounded text-xs cursor-pointer";
+
+// ─── APP UTAMA ────────────────────────────────────────────────────────────────
+function App() {
+  const [page, setPage]       = useState("dashboard");
+  const [guru, setGuru]       = useState([]);
+  const [kelas, setKelas]     = useState([]);
+  const [jadwal, setJadwal]   = useState([]);
+  const [absensi, setAbsensi] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving]   = useState(false);
+  const [exporting, setExp]   = useState(false);
+  const [toast, setToast]     = useState({msg:"",type:"ok"});
+  const [modal, setModal]     = useState(null);
+  const [editItem, setEdit]   = useState(null);
+  const [tanggal, setTanggal] = useState(todayStr());
+  const [localAbs, setLocalAbs] = useState({});
+  const [rekap, setRekap]     = useState({bulan:new Date().getMonth(), tahun:new Date().getFullYear()});
+  const [sideOpen, setSide]   = useState(true);
+
+  // Forms
+  const [guruF, setGuruF]   = useState({nama:"",nip:"",jabatan:""});
+  const [kelasF, setKelasF] = useState({nama:"",tingkat:"VII"});
+  const [jadF, setJadF]     = useState({guru_id:"",kelas_id:"",mapel:"",hari:"Senin",jam_mulai:"07:00",jam_selesai:"08:30"});
+
+  const showToast = (msg, type="ok") => { setToast({msg,type}); setTimeout(()=>setToast({msg:"",type:"ok"}),2800); };
+  const closeModal = () => { setModal(null); setEdit(null); };
+
+  const loadAll = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [g,k,j,a] = await Promise.all([sbGet("guru"),sbGet("kelas"),sbGet("jadwal"),sbGet("absensi")]);
+      setGuru(g); setKelas(k); setJadwal(j); setAbsensi(a);
+    } catch(e) { showToast("❌ Gagal memuat: "+e.message,"err"); }
+    setLoading(false);
+  }, []);
+
+  useEffect(()=>{ loadAll(); },[loadAll]);
+  useEffect(()=>{ setLocalAbs({}); },[tanggal]);
+
+  const namaGuru  = id => guru.find(g=>g.id===id)?.nama||"-";
+  const namaKelas = id => kelas.find(k=>k.id===id)?.nama||"-";
+  const hariIni   = getHari(tanggal);
+  const jadwalHari = jadwal.filter(j=>j.hari===hariIni);
+  const guruIds   = [...new Set(jadwalHari.map(j=>j.guru_id))];
+
+  const getRow = (gid) => absensi.find(a=>a.guru_id===gid&&a.tanggal===tanggal)||{guru_id:gid,tanggal,status:"hadir",jam_masuk:"07:00",jam_pulang:"14:00"};
+  const getDisp = (gid) => localAbs[gid]||getRow(gid);
+  const updLocal = (gid,f,v) => setLocalAbs(p=>({...p,[gid]:{...getDisp(gid),[f]:v}}));
+
+  // Absensi save
+  async function simpan() {
+    setSaving(true);
+    try {
+      const rows = guruIds.map(gid=>{
+        const r=getDisp(gid);
+        return {id:uid(),guru_id:gid,tanggal,status:r.status,jam_masuk:r.status==="hadir"?r.jam_masuk:null,jam_pulang:r.status==="hadir"?r.jam_pulang:null};
+      });
+      await sbUpsert("absensi",rows);
+      await loadAll(); setLocalAbs({});
+      showToast("✅ Absensi tersimpan!");
+    } catch(e){ showToast("❌ "+e.message,"err"); }
+    setSaving(false);
+  }
+
+  // Export
+  async function doExportRekap() {
+    setExp(true);
+    try { exportRekap({guru,absensi,bulan:rekap.bulan,tahun:rekap.tahun}); showToast("📥 File Excel diunduh!"); }
+    catch(e){ showToast("❌ "+e.message,"err"); }
+    setExp(false);
+  }
+  async function doExportHarian() {
+    setExp(true);
+    try { exportHarian({guru,jadwal,absensi,kelas,tanggal}); showToast("📥 File Excel diunduh!"); }
+    catch(e){ showToast("❌ "+e.message,"err"); }
+    setExp(false);
+  }
+
+  // Stats
+  const statH = absensi.filter(a=>a.status==="hadir").length;
+  const statA = absensi.filter(a=>a.status==="alpha").length;
+
+  // Rekap rows
+  const rekapRows = useMemo(()=>{
+    const prefix=`${rekap.tahun}-${String(rekap.bulan+1).padStart(2,"0")}`;
+    return guru.map(g=>{
+      const rows=absensi.filter(a=>a.guru_id===g.id&&a.tanggal.startsWith(prefix));
+      const h=rows.filter(a=>a.status==="hadir").length,i=rows.filter(a=>a.status==="izin").length,
+            s=rows.filter(a=>a.status==="sakit").length,al=rows.filter(a=>a.status==="alpha").length;
+      const tot=h+i+s+al;
+      return {...g,h,i,s,al,tot,pct:tot>0?Math.round(h/tot*100):0};
+    });
+  },[absensi,rekap,guru]);
+
+  // CRUD Guru
+  function openGuru(item){ setEdit(item||null); setGuruF(item?{nama:item.nama,nip:item.nip||"",jabatan:item.jabatan||""}:{nama:"",nip:"",jabatan:""}); setModal("guru"); }
+  async function saveGuru(){ if(!guruF.nama.trim())return; setSaving(true);
+    try{ editItem?await sbUpdate("guru",editItem.id,guruF):await sbInsert("guru",{id:uid(),...guruF}); await loadAll(); closeModal(); showToast("✅ Guru disimpan"); }catch(e){showToast("❌ "+e.message,"err");} setSaving(false); }
+  async function delGuru(id){ if(!confirm("Hapus guru ini?"))return; try{await sbDelete("guru",id);await loadAll();showToast("🗑️ Dihapus");}catch(e){showToast("❌ "+e.message,"err");} }
+
+  // CRUD Kelas
+  function openKelas(item){ setEdit(item||null); setKelasF(item?{nama:item.nama,tingkat:item.tingkat}:{nama:"",tingkat:"VII"}); setModal("kelas"); }
+  async function saveKelas(){ if(!kelasF.nama.trim())return; setSaving(true);
+    try{ editItem?await sbUpdate("kelas",editItem.id,kelasF):await sbInsert("kelas",{id:uid(),...kelasF}); await loadAll(); closeModal(); showToast("✅ Kelas disimpan"); }catch(e){showToast("❌ "+e.message,"err");} setSaving(false); }
+  async function delKelas(id){ if(!confirm("Hapus kelas ini?"))return; try{await sbDelete("kelas",id);await loadAll();showToast("🗑️ Dihapus");}catch(e){showToast("❌ "+e.message,"err");} }
+
+  // CRUD Jadwal
+  function openJadwal(item){ setEdit(item||null); setJadF(item?{guru_id:item.guru_id,kelas_id:item.kelas_id,mapel:item.mapel,hari:item.hari,jam_mulai:item.jam_mulai,jam_selesai:item.jam_selesai}:{guru_id:guru[0]?.id||"",kelas_id:kelas[0]?.id||"",mapel:"",hari:"Senin",jam_mulai:"07:00",jam_selesai:"08:30"}); setModal("jadwal"); }
+  async function saveJadwal(){ if(!jadF.mapel.trim()||!jadF.guru_id||!jadF.kelas_id)return; setSaving(true);
+    try{ editItem?await sbUpdate("jadwal",editItem.id,jadF):await sbInsert("jadwal",{id:uid(),...jadF}); await loadAll(); closeModal(); showToast("✅ Jadwal disimpan"); }catch(e){showToast("❌ "+e.message,"err");} setSaving(false); }
+  async function delJadwal(id){ if(!confirm("Hapus jadwal?"))return; try{await sbDelete("jadwal",id);await loadAll();showToast("🗑️ Dihapus");}catch(e){showToast("❌ "+e.message,"err");} }
+
+  const nav = [
+    {id:"dashboard",icon:"◈",label:"Dashboard"},
+    {id:"absensi",  icon:"✎",label:"Absensi"},
+    {id:"rekap",    icon:"▦",label:"Rekap"},
+    {id:"guru",     icon:"👤",label:"Data Guru"},
+    {id:"kelas",    icon:"🏫",label:"Data Kelas"},
+    {id:"jadwal",   icon:"📅",label:"Jadwal"},
+  ];
+
+  return (
+    <div className="flex min-h-screen">
+      <Toast msg={toast.msg} type={toast.type} />
+
+      {/* ── SIDEBAR ── */}
+      <aside className="flex flex-col flex-shrink-0 shadow-xl" style={{width:220,background:"linear-gradient(180deg,#1e3a5f,#0f2340)",minHeight:"100vh"}}>
+        <div className="flex items-center gap-3 px-4 py-6" style={{borderBottom:"1px solid rgba(255,255,255,0.1)"}}>
+          <span style={{fontSize:28}}>🕌</span>
+          <div>
+            <div className="font-bold tracking-widest" style={{color:"#e2c27d",fontSize:13}}>ABSENSI</div>
+            <div style={{color:"rgba(255,255,255,0.35)",fontSize:9,letterSpacing:1}}>Madrasah Digital</div>
+          </div>
+        </div>
+        <nav className="flex flex-col gap-1 p-3">
+          {nav.map(n=>(
+            <button key={n.id} onClick={()=>setPage(n.id)}
+              className="flex items-center gap-2 px-3 py-2.5 rounded-lg text-left text-sm font-medium transition-all"
+              style={{
+                background:page===n.id?"rgba(226,194,125,0.15)":"transparent",
+                color:page===n.id?"#e2c27d":"rgba(255,255,255,0.55)",
+                border:"none",cursor:"pointer",
+                borderLeft:page===n.id?"3px solid #e2c27d":"3px solid transparent",
+                fontFamily:"system-ui",
+              }}>
+              <span style={{fontSize:13,width:16,textAlign:"center"}}>{n.icon}</span>{n.label}
+            </button>
+          ))}
+        </nav>
+        <div className="mt-auto px-4 py-4" style={{borderTop:"1px solid rgba(255,255,255,0.08)"}}>
+          <div style={{color:"rgba(255,255,255,0.35)",fontSize:11,fontFamily:"system-ui"}}>👤 Admin Madrasah</div>
+          <div style={{color:"rgba(255,255,255,0.2)",fontSize:10,fontFamily:"system-ui",marginTop:4}}>
+            {loading?"⏳ Memuat...":"● Terhubung ke Supabase"}
+          </div>
+        </div>
+      </aside>
+
+      {/* ── MAIN ── */}
+      <main className="flex-1 p-8 overflow-y-auto">
+        {loading ? (
+          <div className="flex items-center justify-center h-64 text-gray-400 text-sm" style={{fontFamily:"system-ui"}}>
+            <span className="spin mr-2">⏳</span> Memuat data dari Supabase...
+          </div>
+        ) : <>
+
+        {/* ══ DASHBOARD ══ */}
+        {page==="dashboard" && (
+          <div>
+            <Header title="Dashboard" sub={fmtTgl(todayStr())} />
+            <div className="grid grid-cols-4 gap-4 mb-6">
+              {[
+                {label:"Total Guru",val:guru.length,icon:"👤",c:"#6366f1"},
+                {label:"Total Kelas",val:kelas.length,icon:"🏫",c:"#0ea5e9"},
+                {label:"Total Hadir",val:statH,icon:"✅",c:"#10b981"},
+                {label:"Alpha",val:statA,icon:"⚠️",c:"#ef4444"},
+              ].map(s=>(
+                <div key={s.label} className="bg-white rounded-xl p-5 shadow-sm" style={{borderTop:`4px solid ${s.c}`}}>
+                  <div style={{fontSize:22,marginBottom:6}}>{s.icon}</div>
+                  <div style={{fontSize:30,fontWeight:700,color:s.c,lineHeight:1}}>{s.val}</div>
+                  <div className="text-xs mt-1 text-gray-500" style={{fontFamily:"system-ui"}}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+            <Card title={`Jadwal Hari Ini — ${getHari(todayStr())}`}>
+              {jadwal.filter(j=>j.hari===getHari(todayStr())).length===0
+                ? <Empty>Tidak ada jadwal hari ini.</Empty>
+                : <Tbl heads={["Guru","Kelas","Mata Pelajaran","Jam Mulai","Jam Selesai"]}>
+                    {jadwal.filter(j=>j.hari===getHari(todayStr())).sort((a,b)=>a.jam_mulai.localeCompare(b.jam_mulai)).map((j,i)=>(
+                      <tr key={j.id} style={{background:i%2===0?"#fff":"#f9fafb"}}>
+                        <Td>{namaGuru(j.guru_id)}</Td>
+                        <Td><Chip>{namaKelas(j.kelas_id)}</Chip></Td>
+                        <Td><b>{j.mapel}</b></Td>
+                        <Td>{j.jam_mulai}</Td>
+                        <Td>{j.jam_selesai}</Td>
+                      </tr>
+                    ))}
+                  </Tbl>}
+            </Card>
+          </div>
+        )}
+
+        {/* ══ ABSENSI ══ */}
+        {page==="absensi" && (
+          <div>
+            <Header title="Input Absensi"
+              action={<BtnGreen onClick={doExportHarian} disabled={exporting}>{exporting?"⏳...":"📥 Export Excel"}</BtnGreen>} />
+            <div className="bg-white rounded-xl p-5 shadow-sm mb-5">
+              <div className="flex items-end gap-4 flex-wrap">
+                <div>
+                  <label className="block text-xs font-semibold mb-1 text-gray-600" style={{fontFamily:"system-ui"}}>Tanggal</label>
+                  <input type="date" value={tanggal} onChange={e=>setTanggal(e.target.value)} className={inp} style={{width:"auto"}} />
+                </div>
+                <span className="px-4 py-1.5 rounded-full text-sm font-bold mb-0.5" style={{background:"#ede9fe",color:"#7c3aed",fontFamily:"system-ui"}}>{hariIni}</span>
+              </div>
+            </div>
+            {guruIds.length===0
+              ? <div className="bg-white rounded-xl p-10 shadow-sm text-center text-gray-400 text-sm" style={{fontFamily:"system-ui"}}>
+                  <div style={{fontSize:40,marginBottom:12}}>📭</div>
+                  Tidak ada guru yang mengajar pada hari {hariIni}.<br/>
+                  <span className="text-xs mt-1 block">Silakan atur jadwal di menu Jadwal.</span>
+                </div>
+              : <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full border-collapse">
+                      <thead><tr>{["No","Nama Guru","Kelas & Mapel","Status","Jam Masuk","Jam Pulang"].map(h=><Th key={h}>{h}</Th>)}</tr></thead>
+                      <tbody>
+                        {guruIds.map((gid,idx)=>{
+                          const g=guru.find(x=>x.id===gid);
+                          const row=getDisp(gid);
+                          const isH=row.status==="hadir";
+                          const gj=jadwalHari.filter(j=>j.guru_id===gid).sort((a,b)=>a.jam_mulai.localeCompare(b.jam_mulai));
+                          return (
+                            <tr key={gid} style={{background:idx%2===0?"#fff":"#f9fafb",borderBottom:"1px solid #f3f4f6"}}>
+                              <Td><span className="text-gray-400">{idx+1}</span></Td>
+                              <Td>
+                                <div className="font-semibold text-sm">{g?.nama}</div>
+                                <div className="text-xs text-gray-400">{g?.jabatan}</div>
+                              </Td>
+                              <Td>
+                                {gj.map(jj=>(
+                                  <div key={jj.id} className="text-xs mb-1">
+                                    <Chip>{namaKelas(jj.kelas_id)}</Chip>
+                                    <span className="mx-1 text-gray-700">{jj.mapel}</span>
+                                    <span className="text-gray-400">{jj.jam_mulai}–{jj.jam_selesai}</span>
+                                  </div>
+                                ))}
+                              </Td>
+                              <Td>
+                                <select value={row.status} onChange={e=>updLocal(gid,"status",e.target.value)} className={selSm}>
+                                  {STATUS_OPT.map(s=><option key={s.value} value={s.value}>{s.label}</option>)}
+                                </select>
+                              </Td>
+                              <Td><input type="time" value={row.jam_masuk||"07:00"} disabled={!isH} onChange={e=>updLocal(gid,"jam_masuk",e.target.value)} className={timInp} style={{opacity:isH?1:0.3}} /></Td>
+                              <Td><input type="time" value={row.jam_pulang||"14:00"} disabled={!isH} onChange={e=>updLocal(gid,"jam_pulang",e.target.value)} className={timInp} style={{opacity:isH?1:0.3}} /></Td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="flex justify-between items-center px-5 py-4 bg-gray-50 border-t border-gray-100">
+                    <span className="text-sm text-gray-500" style={{fontFamily:"system-ui"}}>{guruIds.length} guru terjadwal hari {hariIni}</span>
+                    <BtnPrimary onClick={simpan} disabled={saving}>{saving?"⏳ Menyimpan...":"💾 Simpan Absensi"}</BtnPrimary>
+                  </div>
+                </div>}
+          </div>
+        )}
+
+        {/* ══ REKAP ══ */}
+        {page==="rekap" && (
+          <div>
+            <Header title="Rekap Bulanan"
+              action={<BtnGreen onClick={doExportRekap} disabled={exporting}>{exporting?"⏳ Mengunduh...":"📥 Export Excel"}</BtnGreen>} />
+            <div className="bg-white rounded-xl p-5 shadow-sm mb-4">
+              <div className="flex gap-4 flex-wrap items-end">
+                <div>
+                  <label className="block text-xs font-semibold mb-1 text-gray-600" style={{fontFamily:"system-ui"}}>Bulan</label>
+                  <select className={selSm} value={rekap.bulan} onChange={e=>setRekap(p=>({...p,bulan:Number(e.target.value)}))}>
+                    {BULAN.map((b,i)=><option key={i} value={i}>{b}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold mb-1 text-gray-600" style={{fontFamily:"system-ui"}}>Tahun</label>
+                  <select className={selSm} value={rekap.tahun} onChange={e=>setRekap(p=>({...p,tahun:Number(e.target.value)}))}>
+                    {[2024,2025,2026].map(y=><option key={y} value={y}>{y}</option>)}
+                  </select>
+                </div>
+                <span className="px-4 py-1.5 rounded-full text-sm font-semibold mb-0.5" style={{background:"#ede9fe",color:"#7c3aed",fontFamily:"system-ui"}}>{BULAN[rekap.bulan]} {rekap.tahun}</span>
+              </div>
+            </div>
+            <div className="flex items-start gap-3 rounded-xl p-4 mb-4 text-sm" style={{background:"#eff6ff",border:"1px solid #bfdbfe",fontFamily:"system-ui"}}>
+              <span style={{fontSize:18}}>📊</span>
+              <div>
+                <div className="font-semibold text-sm" style={{color:"#1e3a5f"}}>Export Excel menghasilkan 3 sheet:</div>
+                <div className="text-xs text-gray-500 mt-1">
+                  <b>Sheet 1</b> — Rekap ringkas &nbsp;·&nbsp; <b>Sheet 2</b> — Detail harian (H/I/S/A) &nbsp;·&nbsp; <b>Sheet 3</b> — Jam masuk & pulang
+                </div>
+              </div>
+            </div>
+            <Card>
+              <Tbl heads={["Nama Guru","Jabatan","Hadir","Izin","Sakit","Alpha","% Hadir"]}>
+                {rekapRows.map((r,i)=>(
+                  <tr key={r.id} style={{background:i%2===0?"#fff":"#f9fafb",borderBottom:"1px solid #f3f4f6"}}>
+                    <Td><b>{r.nama}</b></Td>
+                    <Td><span className="text-xs text-gray-500">{r.jabatan}</span></Td>
+                    <Td><span className="px-2 py-0.5 rounded-full text-xs font-bold" style={{background:"#d1fae5",color:"#10b981"}}>{r.h}</span></Td>
+                    <Td><span className="px-2 py-0.5 rounded-full text-xs font-bold" style={{background:"#fef3c7",color:"#f59e0b"}}>{r.i}</span></Td>
+                    <Td><span className="px-2 py-0.5 rounded-full text-xs font-bold" style={{background:"#dbeafe",color:"#3b82f6"}}>{r.s}</span></Td>
+                    <Td><span className="px-2 py-0.5 rounded-full text-xs font-bold" style={{background:"#fee2e2",color:"#ef4444"}}>{r.al}</span></Td>
+                    <Td>
+                      <div className="flex items-center gap-2">
+                        <div className="rounded-full overflow-hidden" style={{height:6,background:"#e5e7eb",width:80}}>
+                          <div style={{height:6,width:`${r.pct}%`,background:"linear-gradient(90deg,#10b981,#34d399)"}}/>
+                        </div>
+                        <span className="text-xs text-gray-600 min-w-8">{r.pct}%</span>
+                      </div>
+                    </Td>
+                  </tr>
+                ))}
+              </Tbl>
+            </Card>
+          </div>
+        )}
+
+        {/* ══ DATA GURU ══ */}
+        {page==="guru" && (
+          <div>
+            <Header title="Data Guru" sub={`${guru.length} guru terdaftar`}
+              action={<BtnPrimary onClick={()=>openGuru(null)}>+ Tambah Guru</BtnPrimary>} />
+            <Card>
+              <Tbl heads={["No","Nama Guru","NIP","Jabatan","Aksi"]}>
+                {guru.map((g,i)=>(
+                  <tr key={g.id} style={{background:i%2===0?"#fff":"#f9fafb",borderBottom:"1px solid #f3f4f6"}}>
+                    <Td><span className="text-gray-400">{i+1}</span></Td>
+                    <Td><b>{g.nama}</b></Td>
+                    <Td><span className="text-xs text-gray-500">{g.nip||"-"}</span></Td>
+                    <Td><span className="px-2 py-0.5 rounded text-xs font-semibold" style={{background:"#e0f2fe",color:"#0369a1",fontFamily:"system-ui"}}>{g.jabatan||"-"}</span></Td>
+                    <Td>
+                      <div className="flex gap-2">
+                        <button onClick={()=>openGuru(g)} className={btnSmBlue} style={{background:"#f0f9ff",color:"#0369a1",border:"1px solid #bae6fd"}}>✏️ Edit</button>
+                        <button onClick={()=>delGuru(g.id)} className={btnSmRed} style={{background:"#fff1f2",color:"#e11d48",border:"1px solid #fecdd3"}}>🗑️</button>
+                      </div>
+                    </Td>
+                  </tr>
+                ))}
+              </Tbl>
+            </Card>
+          </div>
+        )}
+
+        {/* ══ DATA KELAS ══ */}
+        {page==="kelas" && (
+          <div>
+            <Header title="Data Kelas" sub={`${kelas.length} kelas terdaftar`}
+              action={<BtnPrimary onClick={()=>openKelas(null)}>+ Tambah Kelas</BtnPrimary>} />
+            <div className="bg-white rounded-xl p-5 shadow-sm">
+              <div className="grid gap-4" style={{gridTemplateColumns:"repeat(auto-fill,minmax(170px,1fr))"}}>
+                {kelas.map(k=>(
+                  <div key={k.id} className="rounded-xl p-4 border" style={{border:"1.5px solid #e5e7eb"}}>
+                    <div className="text-xl font-bold" style={{color:"#1e3a5f"}}>{k.nama}</div>
+                    <div className="text-xs text-gray-400 mt-1" style={{fontFamily:"system-ui"}}>Tingkat {k.tingkat}</div>
+                    <div className="flex gap-2 mt-3">
+                      <button onClick={()=>openKelas(k)} className="flex-1 py-1 text-xs rounded cursor-pointer" style={{background:"#f0f9ff",color:"#0369a1",border:"1px solid #bae6fd",fontFamily:"system-ui"}}>✏️ Edit</button>
+                      <button onClick={()=>delKelas(k.id)} className="py-1 px-2 text-xs rounded cursor-pointer" style={{background:"#fff1f2",color:"#e11d48",border:"1px solid #fecdd3",fontFamily:"system-ui"}}>🗑️</button>
+                    </div>
+                  </div>
+                ))}
+                <button onClick={()=>openKelas(null)} className="rounded-xl flex flex-col items-center justify-center gap-2 cursor-pointer" style={{minHeight:100,border:"2px dashed #d1d5db",background:"#f9fafb",color:"#9ca3af",fontFamily:"system-ui",fontSize:13}}>
+                  <span style={{fontSize:28}}>＋</span> Tambah Kelas
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ══ JADWAL ══ */}
+        {page==="jadwal" && (
+          <div>
+            <Header title="Jadwal Pelajaran"
+              action={<BtnPrimary onClick={()=>openJadwal(null)}>+ Tambah Jadwal</BtnPrimary>} />
+            {HARI_LIST.map(hari=>{
+              const rows=jadwal.filter(j=>j.hari===hari).sort((a,b)=>a.jam_mulai.localeCompare(b.jam_mulai));
+              return (
+                <div key={hari} className="mb-5">
+                  <div className="text-sm font-bold mb-2 pl-3" style={{color:"#1e3a5f",borderLeft:"4px solid #e2c27d"}}>{hari}</div>
+                  <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+                    {rows.length===0
+                      ? <div className="p-4 text-center text-sm text-gray-400" style={{fontFamily:"system-ui"}}>Belum ada jadwal untuk hari {hari}.</div>
+                      : <Tbl heads={["Jam","Guru","Kelas","Mata Pelajaran","Aksi"]}>
+                          {rows.map((j,i)=>(
+                            <tr key={j.id} style={{background:i%2===0?"#fff":"#f9fafb",borderBottom:"1px solid #f3f4f6"}}>
+                              <Td><b style={{color:"#6366f1"}}>{j.jam_mulai} – {j.jam_selesai}</b></Td>
+                              <Td>{namaGuru(j.guru_id)}</Td>
+                              <Td><Chip>{namaKelas(j.kelas_id)}</Chip></Td>
+                              <Td><b>{j.mapel}</b></Td>
+                              <Td>
+                                <div className="flex gap-2">
+                                  <button onClick={()=>openJadwal(j)} className={btnSmBlue} style={{background:"#f0f9ff",color:"#0369a1",border:"1px solid #bae6fd"}}>✏️ Edit</button>
+                                  <button onClick={()=>delJadwal(j.id)} className={btnSmRed} style={{background:"#fff1f2",color:"#e11d48",border:"1px solid #fecdd3"}}>🗑️</button>
+                                </div>
+                              </Td>
+                            </tr>
+                          ))}
+                        </Tbl>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        </>}
+      </main>
+
+      {/* ══ MODALS ══ */}
+      {modal==="guru" && (
+        <Modal title={editItem?"Edit Guru":"Tambah Guru"} onClose={closeModal}>
+          <Field label="Nama Lengkap *"><input className={inp} value={guruF.nama} placeholder="cth: Drs. Ahmad Fauzi, M.Pd" onChange={e=>setGuruF(p=>({...p,nama:e.target.value}))} /></Field>
+          <Field label="NIP"><input className={inp} value={guruF.nip} placeholder="197001012000031001" onChange={e=>setGuruF(p=>({...p,nip:e.target.value}))} /></Field>
+          <Field label="Jabatan / Mata Pelajaran"><input className={inp} value={guruF.jabatan} placeholder="cth: Guru Matematika" onChange={e=>setGuruF(p=>({...p,jabatan:e.target.value}))} /></Field>
+          <div className="flex gap-3 justify-end mt-5">
+            <button onClick={closeModal} className="px-4 py-2 rounded-lg text-sm cursor-pointer" style={{background:"#f3f4f6",border:"1px solid #d1d5db",fontFamily:"system-ui"}}>Batal</button>
+            <BtnPrimary onClick={saveGuru} disabled={saving}>{saving?"⏳...":"💾 Simpan"}</BtnPrimary>
+          </div>
+        </Modal>
+      )}
+      {modal==="kelas" && (
+        <Modal title={editItem?"Edit Kelas":"Tambah Kelas"} onClose={closeModal}>
+          <Field label="Nama Kelas *"><input className={inp} value={kelasF.nama} placeholder="cth: VII A" onChange={e=>setKelasF(p=>({...p,nama:e.target.value}))} /></Field>
+          <Field label="Tingkat">
+            <select className={sel} value={kelasF.tingkat} onChange={e=>setKelasF(p=>({...p,tingkat:e.target.value}))}>
+              {["VII","VIII","IX","X","XI","XII"].map(t=><option key={t} value={t}>{t}</option>)}
+            </select>
+          </Field>
+          <div className="flex gap-3 justify-end mt-5">
+            <button onClick={closeModal} className="px-4 py-2 rounded-lg text-sm cursor-pointer" style={{background:"#f3f4f6",border:"1px solid #d1d5db",fontFamily:"system-ui"}}>Batal</button>
+            <BtnPrimary onClick={saveKelas} disabled={saving}>{saving?"⏳...":"💾 Simpan"}</BtnPrimary>
+          </div>
+        </Modal>
+      )}
+      {modal==="jadwal" && (
+        <Modal title={editItem?"Edit Jadwal":"Tambah Jadwal"} onClose={closeModal}>
+          <Field label="Guru *">
+            <select className={sel} value={jadF.guru_id} onChange={e=>setJadF(p=>({...p,guru_id:e.target.value}))}>
+              <option value="">-- Pilih Guru --</option>
+              {guru.map(g=><option key={g.id} value={g.id}>{g.nama}</option>)}
+            </select>
+          </Field>
+          <Field label="Kelas *">
+            <select className={sel} value={jadF.kelas_id} onChange={e=>setJadF(p=>({...p,kelas_id:e.target.value}))}>
+              <option value="">-- Pilih Kelas --</option>
+              {kelas.map(k=><option key={k.id} value={k.id}>{k.nama}</option>)}
+            </select>
+          </Field>
+          <Field label="Mata Pelajaran *"><input className={inp} value={jadF.mapel} placeholder="cth: Matematika" onChange={e=>setJadF(p=>({...p,mapel:e.target.value}))} /></Field>
+          <Field label="Hari">
+            <select className={sel} value={jadF.hari} onChange={e=>setJadF(p=>({...p,hari:e.target.value}))}>
+              {HARI_LIST.map(h=><option key={h} value={h}>{h}</option>)}
+            </select>
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Jam Mulai"><input type="time" className={inp} value={jadF.jam_mulai} onChange={e=>setJadF(p=>({...p,jam_mulai:e.target.value}))} /></Field>
+            <Field label="Jam Selesai"><input type="time" className={inp} value={jadF.jam_selesai} onChange={e=>setJadF(p=>({...p,jam_selesai:e.target.value}))} /></Field>
+          </div>
+          <div className="flex gap-3 justify-end mt-5">
+            <button onClick={closeModal} className="px-4 py-2 rounded-lg text-sm cursor-pointer" style={{background:"#f3f4f6",border:"1px solid #d1d5db",fontFamily:"system-ui"}}>Batal</button>
+            <BtnPrimary onClick={saveJadwal} disabled={saving}>{saving?"⏳...":"💾 Simpan"}</BtnPrimary>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// ─── KOMPONEN KECIL ───────────────────────────────────────────────────────────
+function Header({ title, sub, action }) {
+  return (
+    <div className="flex justify-between items-start mb-6 pb-4" style={{borderBottom:"2px solid #e5e7eb"}}>
+      <div>
+        <h1 className="text-2xl font-bold" style={{color:"#1e3a5f"}}>{title}</h1>
+        {sub && <div className="text-sm text-gray-400 mt-1" style={{fontFamily:"system-ui"}}>{sub}</div>}
+      </div>
+      {action && <div className="flex gap-2">{action}</div>}
+    </div>
+  );
+}
+function Card({ title, children }) {
+  return (
+    <div className="bg-white rounded-xl shadow-sm mb-5 overflow-hidden">
+      {title && <div className="px-5 pt-5 pb-3 font-bold text-sm" style={{color:"#1e3a5f",fontFamily:"system-ui"}}>{title}</div>}
+      <div className={title?"px-5 pb-5":"p-5"}>{children}</div>
+    </div>
+  );
+}
+function Tbl({ heads, children }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full" style={{borderCollapse:"collapse"}}>
+        <thead><tr>{heads.map(h=><Th key={h}>{h}</Th>)}</tr></thead>
+        <tbody>{children}</tbody>
+      </table>
+    </div>
+  );
+}
+function Th({ children }) {
+  return <th className="text-left text-xs font-semibold tracking-wide px-4 py-3" style={{background:"#1e3a5f",color:"#e2c27d",fontFamily:"system-ui",whiteSpace:"nowrap"}}>{children}</th>;
+}
+function Td({ children }) {
+  return <td className="px-4 py-3 text-sm" style={{color:"#374151",fontFamily:"system-ui",verticalAlign:"middle"}}>{children}</td>;
+}
+function Empty({ children }) {
+  return <div className="text-center text-sm text-gray-400 py-6" style={{fontFamily:"system-ui"}}>{children}</div>;
+}
+function BtnPrimary({ onClick, disabled, children }) {
+  return (
+    <button onClick={onClick} disabled={disabled} className={btnPrimary}
+      style={{background:"linear-gradient(135deg,#1e3a5f,#2d5a8e)",color:"#e2c27d",fontFamily:"system-ui",opacity:disabled?0.6:1}}>
+      {children}
+    </button>
+  );
+}
+function BtnGreen({ onClick, disabled, children }) {
+  return (
+    <button onClick={onClick} disabled={disabled} className={btnGreen}
+      style={{background:"linear-gradient(135deg,#166534,#15803d)",color:"#fff",fontFamily:"system-ui",opacity:disabled?0.6:1}}>
+      {children}
+    </button>
+  );
+}
+
+// ─── RENDER ───────────────────────────────────────────────────────────────────
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
